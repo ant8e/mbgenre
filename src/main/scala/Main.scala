@@ -1,4 +1,7 @@
-import akka.actor.ActorSystem
+import _root_.MusicBrainzSupport.{ReleaseGroupId, ReleaseId}
+import _root_.RunActor.Requests
+import akka.actor.{ActorRef, Actor, ActorSystem}
+import akka.dispatch.Futures
 import spray.client.pipelining._
 import spray.http.HttpHeaders._
 import spray.http.MediaTypes._
@@ -11,14 +14,18 @@ import spray.json.lenses.JsonLenses._
 import scala.concurrent.Future
 
 
-class MusicBrainzSupport(implicit val system: ActorSystem) extends SprayJsonSupport {
-
-
-  implicit val disp = system.dispatcher
+object MusicBrainzSupport {
 
   case class ReleaseId(value: String)
 
   case class ReleaseGroupId(value: String)
+
+}
+
+class MusicBrainzSupport(implicit val system: ActorSystem) extends SprayJsonSupport {
+
+
+  implicit val disp = system.dispatcher
 
   private val jspipeline: HttpRequest => Future[JsObject] =
     addHeader(`Accept-Encoding`(HttpEncodings.*)) ~>
@@ -47,8 +54,8 @@ class AllMusicSupport(implicit val system: ActorSystem) {
 
   import mbSupport._
 
-  implicit val as= system
-//  implicit val dispatcher = system.dispatcher
+  implicit val as = system
+  //  implicit val dispatcher = system.dispatcher
   val pipeline: HttpRequest => Future[String] =
     addHeader(`Accept-Encoding`(HttpEncodingRange.*)) ~> sendReceive ~> unmarshal[String]
 
@@ -58,16 +65,42 @@ class AllMusicSupport(implicit val system: ActorSystem) {
 
     releaseGroupIdOfRelease(id).flatMap {
       case Some(i) => fetchReleaseGroup(i).map(x => x.extract[String](allMusicUrl).headOption)
-      case _ => Future.successful(None)
+      case _       => Future.successful(None)
     }
   }
-
 
   val allMusicGenreRegEx = """<a href="http://www.allmusic.com/genre/.*">(.*)</a>""".r
 
   def allMusicGenre(albumUrl: String): Future[Option[String]] = pipeline(Get(albumUrl))
     .map(x => (allMusicGenreRegEx findFirstMatchIn x).map(x => x.group(1)))
 }
+
+object RunActor {
+
+  import MusicBrainzSupport.ReleaseId
+
+  case object startNewRequest
+
+  case class Requests(l: Seq[ReleaseId])
+
+  case class Results(r: Map[ReleaseId, String])
+
+}
+
+trait RunActor extends Actor {
+
+  import context.become
+
+  def receive = makeReceive(List.empty, Map.empty, self)
+
+  def makeReceive(requests: Seq[ReleaseId], results: Map[ReleaseId, String], p: ActorRef): Actor.Receive = {
+    case Requests(l) => become(makeReceive(requests.toList ::: l.toList, results, sender()))
+    case startNewRequest => if ()
+  }
+
+
+}
+
 
 /**
   */
@@ -83,7 +116,10 @@ object Main extends App {
 
   val id1: ReleaseId = ReleaseId("5000a285-b67e-4cfc-b54b-2b98f1810d2e")
 
-  val res2: Future[Option[String]] = allMusicUrlOfRelease(id1).flatMap { case Some(s) => allMusicGenre(s)}
+  val res2: Future[Option[String]] = allMusicUrlOfRelease(id1).flatMap {
+    case Some(url) => allMusicGenre(url)
+    case None      => Future.successful(None)
+  }
 
   // private val res: Future[Option[ReleaseGroupId]] = releaseGroupIdOfRelease(ReleaseId("5000a285-b67e-4cfc-b54b-2b98f1810d2e"))
   //  res.onSuccess {
