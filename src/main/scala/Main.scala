@@ -13,7 +13,7 @@ import spray.json.JsObject
 import spray.json.lenses.JsonLenses._
 
 import scala.concurrent.Future
-import scala.concurrent.duration.Duration
+import scala.io.Source
 import scala.util.{Failure, Success}
 
 
@@ -171,42 +171,27 @@ object Main extends App {
 
   val system = ActorSystem()
 
+  private val input: List[ReleaseId] = Source.fromInputStream(System.in).getLines().map(ReleaseId).toList
 
-  val id1: ReleaseId = ReleaseId("5000a285-b67e-4cfc-b54b-2b98f1810d2e")
+//  val id1: ReleaseId = ReleaseId("5000a285-b67e-4cfc-b54b-2b98f1810d2e")
+//  val id2: ReleaseId = ReleaseId("73993bc4-901e-4706-a25a-5d08aa044893")
 
-  private val mainActorRef: ActorRef = system.actorOf(MainActor.props(List(id1)))
+  private val mainActorRef: ActorRef = system.actorOf(MainActor.props(input))
 
 
   import scala.concurrent.duration._
-  implicit val timeout = Timeout (2.minutes)
+  implicit val timeout = Timeout(2.minutes)
   implicit val dispatcher = system.dispatcher
   val res2 = (mainActorRef ? "go").mapTo[Map[ReleaseId, String]]
 
 
-  // private val res: Future[Option[ReleaseGroupId]] = releaseGroupIdOfRelease(ReleaseId("5000a285-b67e-4cfc-b54b-2b98f1810d2e"))
-  //  res.onSuccess {
-  //    case Some(ReleaseGroupId(v)) =>
-  //      println(s"release group id : ${v}")
-  //      system.shutdown()
-  //  }
-
-  /* res.onFailure {
-     case e: Throwable =>
-       throw e
-       system.shutdown()
-   }*/
-
-  res2.onSuccess {
-    case x: Map[ReleaseId, String] => for ((k, v) <- x) {
+  res2.onComplete {
+    case Success(x) => for ((k, v) <- x) {
       println(s"allmusic genre for $k : $v")
+      system shutdown
     }
-      system.shutdown()
-  }
-
-  res2.onFailure {
-    case e: Throwable =>
-      throw e
-      system.shutdown()
+    case Failure(e) => throw e
+      system shutdown
   }
 
 }
