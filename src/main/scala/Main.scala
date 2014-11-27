@@ -164,7 +164,8 @@ class MainActor(val ids: Seq[ReleaseId]) extends Actor with ActorLogging {
   }
 
   def awaitResult(a: ActorRef): Actor.Receive = {
-    case Results(r) => a ! r
+    case Results(r) => log.debug("got results :" + r)
+      a ! r
   }
 
 }
@@ -229,8 +230,8 @@ object Main extends App {
   res2.onComplete {
     case Success(x) => for ((k, v) <- x) {
       println(s"allmusic genre for $k : $v")
-      system shutdown
     }
+      system shutdown
     case Failure(e) => throw e
       system shutdown
   }
