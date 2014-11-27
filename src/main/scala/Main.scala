@@ -1,8 +1,12 @@
+import java.io.File
+
 import MusicBrainzSupport.{ReleaseGroupId, ReleaseId}
 import RunActor.{RequestToken, Requests, Response, Results}
 import akka.actor._
 import akka.pattern.ask
 import akka.util.Timeout
+import org.jaudiotagger.audio.{AudioFileIO, AudioFile}
+import org.jaudiotagger.tag.FieldKey
 import spray.client.pipelining._
 import spray.http.HttpHeaders._
 import spray.http.MediaTypes._
@@ -14,7 +18,7 @@ import spray.json.lenses.JsonLenses._
 
 import scala.concurrent.Future
 import scala.io.Source
-import scala.util.{Failure, Success}
+import scala.util.{Try, Failure, Success}
 
 
 object MusicBrainzSupport {
@@ -25,15 +29,20 @@ object MusicBrainzSupport {
 
 }
 
-class MusicBrainzSupport(implicit val system: ActorSystem) extends SprayJsonSupport {
 
+trait ActorRefFactoryProvider {
+  def system(): ActorRefFactory
+}
 
-  implicit val disp = system.dispatcher
+trait MusicBrainzSupport extends SprayJsonSupport {
+  self: ActorRefFactoryProvider =>
+
+  private implicit val disp = system().dispatcher
 
   private val jspipeline: HttpRequest => Future[JsObject] =
     addHeader(`Accept-Encoding`(HttpEncodings.*)) ~>
       addHeader(Accept(`application/json`)) ~>
-      sendReceive ~>
+      sendReceive(system(), system().dispatcher) ~>
       unmarshal[JsObject]
 
   val releaseUri = Uri("http://musicbrainz.org/ws/2/release") withQuery("fmt" -> "json", "inc" -> "release-groups")
@@ -48,20 +57,6 @@ class MusicBrainzSupport(implicit val system: ActorSystem) extends SprayJsonSupp
     fetchRelease(releaseId).map { x =>
       x.extract[String]("release-group".? / 'id).map(ReleaseGroupId)
     }
-}
-
-
-class AllMusicSupport(implicit val system: ActorSystem) {
-
-  val mbSupport = new MusicBrainzSupport()
-
-  import mbSupport._
-
-  implicit val as = system
-  //  implicit val dispatcher = system.dispatcher
-  val pipeline: HttpRequest => Future[String] =
-    addHeader(`Accept-Encoding`(HttpEncodingRange.*)) ~> sendReceive ~> unmarshal[String]
-
 
   def allMusicUrlOfRelease(id: ReleaseId): Future[Option[String]] = {
     val allMusicUrl = 'relations / filter('type.is[String](_ == "allmusic")) / 'url / 'resource
@@ -71,6 +66,15 @@ class AllMusicSupport(implicit val system: ActorSystem) {
       case _ => Future.successful(None)
     }
   }
+}
+
+
+trait AllMusicSupport {
+  self: ActorRefFactoryProvider =>
+
+  private implicit val disp = system().dispatcher
+  val pipeline: HttpRequest => Future[String] =
+    addHeader(`Accept-Encoding`(HttpEncodingRange.*)) ~> sendReceive(system(), system().dispatcher) ~> unmarshal[String]
 
   val allMusicGenreRegEx = """<a href="http://www.allmusic.com/genre/.*">(.*)</a>""".r
 
@@ -92,17 +96,13 @@ object RunActor {
 
 }
 
-class RunActor extends Actor {
+class RunActor extends Actor with MusicBrainzSupport with AllMusicSupport with ActorRefFactoryProvider with ActorLogging {
 
   import context.become
 
-  val support: AllMusicSupport = new AllMusicSupport()(context.system)
-
-  import support.{allMusicGenre, allMusicUrlOfRelease}
-
   def receive = makeReceive(List.empty, Map.empty, 0, self)
 
-  implicit val disp = context.system.dispatcher
+  private implicit val dispatcher = context.system.dispatcher
 
   def runRequest(id: ReleaseId): Unit = allMusicUrlOfRelease(id).flatMap {
     case Some(url) => allMusicGenre(url)
@@ -114,7 +114,9 @@ class RunActor extends Actor {
   }
 
   def makeReceive(requests: Seq[ReleaseId], results: Map[ReleaseId, String], runningRequests: Int, p: ActorRef): Actor.Receive = {
-    case Requests(l) => become(makeReceive(requests.toList ::: l.toList, results, 0, sender()))
+    case Requests(l) =>
+      log.debug(s"received Requests : $l")
+      become(makeReceive(requests.toList ::: l.toList, results, 0, sender()))
     case RequestToken => requests match {
       case h :: t => runRequest(h)
         become(makeReceive(t, results, runningRequests + 1, p))
@@ -130,24 +132,27 @@ class RunActor extends Actor {
         self ! RequestToken
       else
       if (runningRequests == 1) {
+        log.debug("Sending results")
         p ! Results(res)
         p ! PoisonPill
       }
     }
   }
 
-
+  override def system(): ActorRefFactory = context.system
 }
 
 object MainActor {
   def props(ids: Seq[ReleaseId]) = Props(new MainActor(ids))
 }
 
-class MainActor(val ids: Seq[ReleaseId]) extends Actor {
+class MainActor(val ids: Seq[ReleaseId]) extends Actor with ActorLogging {
   val runner = context.actorOf(Props[RunActor])
+  log.debug("Runner actor created")
 
   runner ! Requests(ids)
   for (i <- 1 to 5) {
+    log.debug("Sending token to runner actor")
     runner ! RequestToken
   }
   var results = Map[ReleaseId, String]()
@@ -164,22 +169,58 @@ class MainActor(val ids: Seq[ReleaseId]) extends Actor {
 
 }
 
+trait ReadTagSupport {
+
+  def readMusicBrainzReleaseId(f: File): Try[Option[String]] = Try {
+    val tag = AudioFileIO.read(f).getTag.getFirst(FieldKey.MUSICBRAINZ_RELEASEID)
+    if (tag.isEmpty) None else Some(tag)
+  }
+
+  def isAudioFile(f: File): Boolean = Try {
+    AudioFileIO.read(f)
+  }.isSuccess
+
+  def listAllAudioFiles(directory: File): List[File] = if (!directory.isDirectory)
+    Nil
+  else {
+    val current: List[File] = directory.listFiles().toList
+    current.filter(isAudioFile) ++ current.filter(_.isDirectory).flatMap(listAllAudioFiles)
+  }
+
+}
+
+object ReadTagSupport extends ReadTagSupport
+
 /**
   */
 object Main extends App {
 
+  println (args.mkString)
+
+  if (args.length < 1) {
+    println( """Usage : mbgenre <directory> """)
+    System.exit(1)
+  }
+
+  val dir = new File(args(0))
+
+  private val ids: List[ReleaseId] =
+    ReadTagSupport.listAllAudioFiles(dir)
+      .map(ReadTagSupport.readMusicBrainzReleaseId)
+      .collect { case Success(Some(id)) => ReleaseId(id)}
 
   val system = ActorSystem()
 
-  private val input: List[ReleaseId] = Source.fromInputStream(System.in).getLines().map(ReleaseId).toList
+  //  private val input: List[ReleaseId] = Source.fromInputStream(System.in).getLines().map(ReleaseId).toList
 
-//  val id1: ReleaseId = ReleaseId("5000a285-b67e-4cfc-b54b-2b98f1810d2e")
-//  val id2: ReleaseId = ReleaseId("73993bc4-901e-4706-a25a-5d08aa044893")
+  val id1: ReleaseId = ReleaseId("5000a285-b67e-4cfc-b54b-2b98f1810d2e")
+  val id2: ReleaseId = ReleaseId("73993bc4-901e-4706-a25a-5d08aa044893")
 
-  private val mainActorRef: ActorRef = system.actorOf(MainActor.props(input))
+  private val mainActorRef: ActorRef = system.actorOf(MainActor.props(ids))
 
 
   import scala.concurrent.duration._
+
   implicit val timeout = Timeout(2.minutes)
   implicit val dispatcher = system.dispatcher
   val res2 = (mainActorRef ? "go").mapTo[Map[ReleaseId, String]]
