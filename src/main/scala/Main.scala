@@ -76,10 +76,10 @@ trait AllMusicSupport {
   val pipeline: HttpRequest => Future[String] =
     addHeader(`Accept-Encoding`(HttpEncodingRange.*)) ~> sendReceive(system(), system().dispatcher) ~> unmarshal[String]
 
-  val allMusicGenreRegEx = """<a href="http://www.allmusic.com/genre/.*">(.*)</a>""".r
+  val allMusicGenreRegEx = """<a href="http://www.allmusic.com/genre/[^"]+">([^<]+)</a>""".r
 
   def allMusicGenre(albumUrl: String): Future[Option[String]] = pipeline(Get(albumUrl))
-    .map(x => (allMusicGenreRegEx findFirstMatchIn x).map(x => x.group(1)))
+    .map(page => (allMusicGenreRegEx findFirstMatchIn page).map(m => m.group(1)))
 }
 
 object RunActor {
@@ -205,10 +205,14 @@ object Main extends App {
 
   val dir = new File(args(0))
 
-  private val ids: List[ReleaseId] =
+  private val fileAndRelease: List[(File, Option[ReleaseId])] =
     ReadTagSupport.listAllAudioFiles(dir)
-      .map(ReadTagSupport.readMusicBrainzReleaseId)
-      .collect { case Success(Some(id)) => ReleaseId(id)}
+      .map(f => (f,ReadTagSupport.readMusicBrainzReleaseId(f).getOrElse(None).map(ReleaseId)))
+
+
+   val ids = fileAndRelease.map (id => id._2)
+      .distinct
+      .collect { case Some(id) => id}
 
   val system = ActorSystem()
 
