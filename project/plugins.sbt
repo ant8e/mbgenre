@@ -1,0 +1,3 @@
+logLevel := Level.Warn
+
+addSbtPlugin("org.brianmckenna" % "sbt-wartremover" % "0.11")
