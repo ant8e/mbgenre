@@ -45,12 +45,12 @@ trait MusicBrainzSupport extends SprayJsonSupport {
       sendReceive(system(), system().dispatcher) ~>
       unmarshal[JsObject]
 
-  val releaseUri = Uri("http://musicbrainz.org/ws/2/release") withQuery("fmt" -> "json", "inc" -> "release-groups")
-  val releaseGroupUri = Uri("http://musicbrainz.org/ws/2/release-group") withQuery("fmt" -> "json", "inc" -> "url-rels")
+  private val releaseUri = Uri("http://musicbrainz.org/ws/2/release") withQuery("fmt" -> "json", "inc" -> "release-groups")
+  private val releaseGroupUri = Uri("http://musicbrainz.org/ws/2/release-group") withQuery("fmt" -> "json", "inc" -> "url-rels")
 
-  def fetchRelease(id: ReleaseId): Future[JsObject] = jspipeline(Get(releaseUri.withPath(releaseUri.path / id.value)))
+  private def fetchRelease(id: ReleaseId): Future[JsObject] = jspipeline(Get(releaseUri.withPath(releaseUri.path / id.value)))
 
-  def fetchReleaseGroup(id: ReleaseGroupId): Future[JsObject] = jspipeline(Get(releaseGroupUri.withPath(releaseGroupUri.path / id.value)))
+  private def fetchReleaseGroup(id: ReleaseGroupId): Future[JsObject] = jspipeline(Get(releaseGroupUri.withPath(releaseGroupUri.path / id.value)))
 
 
   def releaseGroupIdOfRelease(releaseId: ReleaseId): Future[Option[ReleaseGroupId]] =
@@ -99,10 +99,12 @@ object RunActor {
 class RunActor extends Actor with MusicBrainzSupport with AllMusicSupport with ActorRefFactoryProvider with ActorLogging {
 
   import context.become
-
-  def receive = makeReceive(List.empty, Map.empty, 0, self)
-
+  import scala.concurrent.duration._
   private implicit val dispatcher = context.system.dispatcher
+
+  context.system.scheduler.schedule(50.milli,200.milli, self, RequestToken )
+
+  def receive = behavior(List.empty, Map.empty, 0, self)
 
   def runRequest(id: ReleaseId): Unit = allMusicUrlOfRelease(id).flatMap {
     case Some(url) => allMusicGenre(url)
@@ -110,28 +112,30 @@ class RunActor extends Actor with MusicBrainzSupport with AllMusicSupport with A
   }.onComplete {
     case Success(v) => self ! Response(id, v)
     case Failure(t) => self ! Response(id, None)
-
   }
 
-  def makeReceive(requests: Seq[ReleaseId], results: Map[ReleaseId, String], runningRequests: Int, p: ActorRef): Actor.Receive = {
+  def behavior(requests: Seq[ReleaseId], results: Map[ReleaseId, String], runningRequests: Int, p: ActorRef): Actor.Receive = {
     case Requests(l) =>
       log.debug(s"received Requests : $l")
-      become(makeReceive(requests.toList ::: l.toList, results, 0, sender()))
-    case RequestToken => requests match {
-      case h :: t => runRequest(h)
-        become(makeReceive(t, results, runningRequests + 1, p))
-      case _ =>
-    }
+      become(behavior(requests.toList ::: l.toList, results, runningRequests, sender()))
+    case RequestToken =>
+      log.debug(s"received token")
+      requests match {
+        case h :: t =>
+          log.debug(s"running request for $h")
+          runRequest(h)
+          become(behavior(t, results, runningRequests + 1, p))
+        case _ =>
+      }
     case Response(id, genre) => {
+      log.debug(s"received response $id -> $genre")
       val res = genre match {
         case Some(g) => results + (id -> g)
         case _ => results
       }
-      become(makeReceive(requests, res, runningRequests - 1, p))
-      if (requests.size > 0)
-        self ! RequestToken
-      else
-      if (runningRequests == 1) {
+      become(behavior(requests, res, runningRequests - 1, p))
+
+      if (requests.size == 0 && runningRequests == 1) {
         log.debug("Sending results")
         p ! Results(res)
         p ! PoisonPill
@@ -151,10 +155,7 @@ class MainActor(val ids: Seq[ReleaseId]) extends Actor with ActorLogging {
   log.debug("Runner actor created")
 
   runner ! Requests(ids)
-  for (i <- 1 to 5) {
-    log.debug("Sending token to runner actor")
-    runner ! RequestToken
-  }
+
   var results = Map[ReleaseId, String]()
 
   def receive = awaitAsk
@@ -208,32 +209,42 @@ object Main extends App {
   private val ids: List[ReleaseId] =
     ReadTagSupport.listAllAudioFiles(dir)
       .map(ReadTagSupport.readMusicBrainzReleaseId)
-      .collect { case Success(Some(id)) => ReleaseId(id)}
+      .collect { case Success(Some(id)) => ReleaseId(id) }
+      .distinct
 
-  val system = ActorSystem()
+
 
   //  private val input: List[ReleaseId] = Source.fromInputStream(System.in).getLines().map(ReleaseId).toList
 
   val id1: ReleaseId = ReleaseId("5000a285-b67e-4cfc-b54b-2b98f1810d2e")
   val id2: ReleaseId = ReleaseId("73993bc4-901e-4706-a25a-5d08aa044893")
 
-  private val mainActorRef: ActorRef = system.actorOf(MainActor.props(ids))
+//  val ids = List(id1,id2)
+
+  if (ids.isEmpty)
+    println("no mb audio file found")
+  else
+    process(ids)
 
 
-  import scala.concurrent.duration._
+  def process(ids:List[ReleaseId]) = {
+    val system = ActorSystem()
 
-  implicit val timeout = Timeout(2.minutes)
-  implicit val dispatcher = system.dispatcher
-  val res2 = (mainActorRef ? "go").mapTo[Map[ReleaseId, String]]
+    val mainActorRef: ActorRef = system.actorOf(MainActor.props(ids))
 
+    import scala.concurrent.duration._
 
-  res2.onComplete {
-    case Success(x) => for ((k, v) <- x) {
-      println(s"allmusic genre for $k : $v")
+    implicit val timeout = Timeout(2.minutes)
+    implicit val dispatcher = system.dispatcher
+    val res2 = (mainActorRef ? "go").mapTo[Map[ReleaseId, String]]
+
+    res2.onComplete {
+      case Success(x) => for ((k, v) <- x) {
+        println(s"allmusic genre for $k : $v")
+      }
+        system.shutdown()
+      case Failure(e) => throw e
+        system.shutdown()
     }
-      system shutdown
-    case Failure(e) => throw e
-      system shutdown
   }
-
 }
