@@ -1,16 +1,16 @@
 import java.io.File
 
-import MusicBrainzSupport.{ReleaseGroupId, ReleaseId}
-import RunActor.{RequestToken, Requests, Response, Results}
+import MusicBrainzSupport.{ ReleaseGroupId, ReleaseId }
+import RunActor.{ RequestToken, Requests, Response, Results }
 import akka.actor._
 import akka.pattern.ask
 import akka.util.Timeout
-import org.jaudiotagger.audio.{AudioFileIO, AudioFile}
+import org.jaudiotagger.audio.{ AudioFileIO, AudioFile }
 import org.jaudiotagger.tag.FieldKey
 import spray.client.pipelining._
 import spray.http.HttpHeaders._
 import spray.http.MediaTypes._
-import spray.http.{HttpEncodings, HttpRequest, Uri, _}
+import spray.http.{ HttpEncodings, HttpRequest, Uri, _ }
 import spray.httpx.SprayJsonSupport
 import spray.json.DefaultJsonProtocol._
 import spray.json.JsObject
@@ -18,69 +18,7 @@ import spray.json.lenses.JsonLenses._
 
 import scala.concurrent.Future
 import scala.io.Source
-import scala.util.{Try, Failure, Success}
-
-
-object MusicBrainzSupport {
-
-  case class ReleaseId(value: String)
-
-  case class ReleaseGroupId(value: String)
-
-}
-
-
-trait ActorRefFactoryProvider {
-  def system(): ActorRefFactory
-}
-
-trait MusicBrainzSupport extends SprayJsonSupport {
-  self: ActorRefFactoryProvider =>
-
-  private implicit val disp = system().dispatcher
-
-  private val jspipeline: HttpRequest => Future[JsObject] =
-    addHeader(`Accept-Encoding`(HttpEncodings.*)) ~>
-      addHeader(Accept(`application/json`)) ~>
-      sendReceive(system(), system().dispatcher) ~>
-      unmarshal[JsObject]
-
-  private val releaseUri = Uri("http://musicbrainz.org/ws/2/release") withQuery("fmt" -> "json", "inc" -> "release-groups")
-  private val releaseGroupUri = Uri("http://musicbrainz.org/ws/2/release-group") withQuery("fmt" -> "json", "inc" -> "url-rels")
-
-  private def fetchRelease(id: ReleaseId): Future[JsObject] = jspipeline(Get(releaseUri.withPath(releaseUri.path / id.value)))
-
-  private def fetchReleaseGroup(id: ReleaseGroupId): Future[JsObject] = jspipeline(Get(releaseGroupUri.withPath(releaseGroupUri.path / id.value)))
-
-
-  def releaseGroupIdOfRelease(releaseId: ReleaseId): Future[Option[ReleaseGroupId]] =
-    fetchRelease(releaseId).map { x =>
-      x.extract[String]("release-group".? / 'id).map(ReleaseGroupId)
-    }
-
-  def allMusicUrlOfRelease(id: ReleaseId): Future[Option[String]] = {
-    val allMusicUrl = 'relations / filter('type.is[String](_ == "allmusic")) / 'url / 'resource
-
-    releaseGroupIdOfRelease(id).flatMap {
-      case Some(i) => fetchReleaseGroup(i).map(x => x.extract[String](allMusicUrl).headOption)
-      case _ => Future.successful(None)
-    }
-  }
-}
-
-
-trait AllMusicSupport {
-  self: ActorRefFactoryProvider =>
-
-  private implicit val disp = system().dispatcher
-  val pipeline: HttpRequest => Future[String] =
-    addHeader(`Accept-Encoding`(HttpEncodingRange.*)) ~> sendReceive(system(), system().dispatcher) ~> unmarshal[String]
-
-  val allMusicGenreRegEx = """<a href="http://www.allmusic.com/genre/.*">(.*)</a>""".r
-
-  def allMusicGenre(albumUrl: String): Future[Option[String]] = pipeline(Get(albumUrl))
-    .map(x => (allMusicGenreRegEx findFirstMatchIn x).map(x => x.group(1)))
-}
+import scala.util.{ Try, Failure, Success }
 
 object RunActor {
 
@@ -96,13 +34,13 @@ object RunActor {
 
 }
 
-class RunActor extends Actor with MusicBrainzSupport with AllMusicSupport with ActorRefFactoryProvider with ActorLogging {
+class RunActor extends Actor with MusicBrainzSupport with AllMusicSupport with ActorLogging {
 
   import context.become
   import scala.concurrent.duration._
   private implicit val dispatcher = context.system.dispatcher
 
-  context.system.scheduler.schedule(50.milli,200.milli, self, RequestToken )
+  context.system.scheduler.schedule(50.milli, 200.milli, self, RequestToken)
 
   def receive = behavior(List.empty, Map.empty, 0, self)
 
@@ -165,7 +103,8 @@ class MainActor(val ids: Seq[ReleaseId]) extends Actor with ActorLogging {
   }
 
   def awaitResult(a: ActorRef): Actor.Receive = {
-    case Results(r) => log.debug("got results :" + r)
+    case Results(r) =>
+      log.debug("got results :" + r)
       a ! r
   }
 
@@ -194,13 +133,13 @@ trait ReadTagSupport {
 object ReadTagSupport extends ReadTagSupport
 
 /**
-  */
+ */
 object Main extends App {
 
   println(args.mkString)
 
   if (args.length < 1) {
-    println( """Usage : mbgenre <directory> """)
+    println("""Usage : mbgenre <directory> """)
     System.exit(1)
   }
 
@@ -212,22 +151,19 @@ object Main extends App {
       .collect { case Success(Some(id)) => ReleaseId(id) }
       .distinct
 
-
-
   //  private val input: List[ReleaseId] = Source.fromInputStream(System.in).getLines().map(ReleaseId).toList
 
   val id1: ReleaseId = ReleaseId("5000a285-b67e-4cfc-b54b-2b98f1810d2e")
   val id2: ReleaseId = ReleaseId("73993bc4-901e-4706-a25a-5d08aa044893")
 
-//  val ids = List(id1,id2)
+  //  val ids = List(id1,id2)
 
   if (ids.isEmpty)
     println("no mb audio file found")
   else
     process(ids)
 
-
-  def process(ids:List[ReleaseId]) = {
+  def process(ids: List[ReleaseId]) = {
     val system = ActorSystem()
 
     val mainActorRef: ActorRef = system.actorOf(MainActor.props(ids))
@@ -239,11 +175,13 @@ object Main extends App {
     val res2 = (mainActorRef ? "go").mapTo[Map[ReleaseId, String]]
 
     res2.onComplete {
-      case Success(x) => for ((k, v) <- x) {
-        println(s"allmusic genre for $k : $v")
-      }
+      case Success(x) =>
+        for ((k, v) <- x) {
+          println(s"allmusic genre for $k : $v")
+        }
         system.shutdown()
-      case Failure(e) => throw e
+      case Failure(e) =>
+        throw e
         system.shutdown()
     }
   }
